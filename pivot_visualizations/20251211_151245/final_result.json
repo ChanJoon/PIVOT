@@ -1,0 +1,43 @@
+{
+  "timestamp": "20251211_151245",
+  "final_trajectory": {
+    "id": 6,
+    "waypoint": {
+      "x": -1.0499999999999998,
+      "y": 1.25,
+      "z": 0.5599999999999999
+    },
+    "score": 0.95,
+    "reasoning": "Option 6 moves the drone significantly to the left, slightly forward, and upward. This trajectory aligns with approaching the red car (the brown car on the left is assumed to be the target) by clearing the immediate trees and providing a safer, more elevated path towards its general location. It avoids immediate ground obstacles and provides a better vantage point for subsequent maneuvers."
+  },
+  "iterations": 1,
+  "iteration_history": [
+    {
+      "iteration": 1,
+      "selected_id": 6,
+      "confidence": 0.95,
+      "reasoning": "Option 6 moves the drone significantly to the left, slightly forward, and upward. This trajectory aligns with approaching the red car (the brown car on the left is assumed to be the target) by clearing the immediate trees and providing a safer, more elevated path towards its general location. It avoids immediate ground obstacles and provides a better vantage point for subsequent maneuvers.",
+      "search_radius": 1.0,
+      "num_candidates": 8
+    }
+  ],
+  "execution": {
+    "success": true,
+    "trajectory_id": 6,
+    "num_waypoints": 1,
+    "duration_seconds": 3.3576066493988037,
+    "execution_log": [
+      {
+        "waypoint_index": 0,
+        "waypoint": {
+          "x": -1.0499999999999998,
+          "y": 1.25,
+          "z": 0.5599999999999999
+        },
+        "num_commands": 2,
+        "duration_seconds": 3.3575949668884277,
+        "success": true
+      }
+    ]
+  }
+}

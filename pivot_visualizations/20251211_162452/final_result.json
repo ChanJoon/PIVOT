@@ -1,0 +1,43 @@
+{
+  "timestamp": "20251211_162452",
+  "final_trajectory": {
+    "id": 1,
+    "waypoint": {
+      "x": 0.0,
+      "y": 1.25,
+      "z": 0.0
+    },
+    "score": 0.95,
+    "reasoning": "Option 1 is directly on the tree trunk, centrally located in the drone's view. This provides the most direct and efficient path to fulfill the task 'fly to the tree'. Options 3, 4, and 5 are also on the tree but at different heights; option 1 offers a good general target point. The other options (2, 6, 7, 8) are far off to the sides or behind the tree, making them inefficient and not directly aligned with the task."
+  },
+  "iterations": 1,
+  "iteration_history": [
+    {
+      "iteration": 1,
+      "selected_id": 1,
+      "confidence": 0.95,
+      "reasoning": "Option 1 is directly on the tree trunk, centrally located in the drone's view. This provides the most direct and efficient path to fulfill the task 'fly to the tree'. Options 3, 4, and 5 are also on the tree but at different heights; option 1 offers a good general target point. The other options (2, 6, 7, 8) are far off to the sides or behind the tree, making them inefficient and not directly aligned with the task.",
+      "search_radius": 1.0,
+      "num_candidates": 8
+    }
+  ],
+  "execution": {
+    "success": true,
+    "trajectory_id": 1,
+    "num_waypoints": 1,
+    "duration_seconds": 2.013850688934326,
+    "execution_log": [
+      {
+        "waypoint_index": 0,
+        "waypoint": {
+          "x": 0.0,
+          "y": 1.25,
+          "z": 0.0
+        },
+        "num_commands": 1,
+        "duration_seconds": 2.0138373374938965,
+        "success": true
+      }
+    ]
+  }
+}

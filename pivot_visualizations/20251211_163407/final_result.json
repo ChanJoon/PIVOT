@@ -1,0 +1,43 @@
+{
+  "timestamp": "20251211_163407",
+  "final_trajectory": {
+    "id": 2,
+    "waypoint": {
+      "x": -1.5,
+      "y": 1.25,
+      "z": 0.0
+    },
+    "score": 1.0,
+    "reasoning": "Option 2 is the most direct, safe, and efficient path to approach the tree. It targets the base of the tree trunk, avoiding the dense canopy and ground obstacles."
+  },
+  "iterations": 1,
+  "iteration_history": [
+    {
+      "iteration": 1,
+      "selected_id": 2,
+      "confidence": 1.0,
+      "reasoning": "Option 2 is the most direct, safe, and efficient path to approach the tree. It targets the base of the tree trunk, avoiding the dense canopy and ground obstacles.",
+      "search_radius": 1.0,
+      "num_candidates": 8
+    }
+  ],
+  "execution": {
+    "success": true,
+    "trajectory_id": 2,
+    "num_waypoints": 1,
+    "duration_seconds": 3.695068836212158,
+    "execution_log": [
+      {
+        "waypoint_index": 0,
+        "waypoint": {
+          "x": -1.5,
+          "y": 1.25,
+          "z": 0.0
+        },
+        "num_commands": 2,
+        "duration_seconds": 3.695056915283203,
+        "success": true
+      }
+    ]
+  }
+}

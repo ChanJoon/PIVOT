@@ -1,0 +1,163 @@
+# PIVOT Enhanced Configuration
+# Prompting with Iterative Visual Optimization for Drone Navigation
+# Includes improvements for yaw handling, safety checks, and frame re-capture
+
+# ============================================================================
+# API Provider Configuration
+# ============================================================================
+# Choose between "gemini" or "openai" (OpenAI-compatible API)
+api_provider: "gemini"
+
+# Specify the exact model name to use
+# Leave empty to use provider defaults
+# Examples: "gemini-2.5-flash", "gemini-2.5-pro", "openai/gpt-4.1"
+model_name: "gemini-2.5-flash"
+
+# ============================================================================
+# PIVOT Algorithm Parameters
+# ============================================================================
+# Number of trajectory options to present per iteration
+num_candidates: 8
+
+# Maximum number of refinement iterations
+# Recommended: 3-4 for balance of accuracy and VLM cost
+max_iterations: 3
+
+# Search radius reduction factor per iteration
+# Each iteration reduces search space by this factor
+# 0.5 = 50% reduction (recommended)
+refinement_factor: 0.5
+
+# Confidence threshold for early convergence
+# If VLM confidence >= this value, stop iterating
+# Range: 0.0 to 1.0 (0.9 recommended)
+convergence_threshold: 0.9
+
+# ============================================================================
+# NEW: Enhanced Candidate Generation
+# ============================================================================
+# Include yaw angles in trajectory candidates
+include_yaw_in_candidates: true
+
+# Use VLM-based candidate generation
+# When true: VLM identifies relevant regions in image, candidates sampled around those regions
+# When false: Fixed radial sampling pattern (faster, deterministic)
+# Recommended: true for full paper fidelity and instruction-conditioned generation
+# Note: VLM-based generation adds 1 extra VLM API call per PIVOT iteration
+use_vlm_based_candidates: true
+
+# Multi-step trajectories (future feature - complex to visualize)
+multi_step_trajectories: false
+
+# ============================================================================
+# NEW: Closed-Loop Frame Re-capture
+# ============================================================================
+# Re-capture frames during iterative refinement
+# Critical for closed-loop validation
+enable_closed_loop: true
+
+# Recapture frame every N iterations (1 = every iteration)
+frame_recapture_interval: 1
+
+# Check if goal is reached during iterations
+enable_goal_checking: false  # Future feature
+
+# ============================================================================
+# NEW: Safety and Feasibility Checks
+# ============================================================================
+# Enable safety filtering of unsafe candidates
+enable_safety_checks: true
+
+# Workspace bounds (camera-relative coordinates in meters)
+workspace_bounds:
+  x_min: -5.0   # Left limit
+  x_max: 5.0    # Right limit
+  y_min: 0.5    # Forward minimum (don't fly backwards too far)
+  y_max: 10.0   # Forward maximum
+  z_min: 0.5    # Minimum altitude
+  z_max: 5.0    # Maximum altitude
+
+# Velocity and altitude constraints
+max_velocity: 3.0      # Maximum velocity in m/s
+min_altitude: 0.5      # Minimum altitude in meters
+max_altitude: 10.0     # Maximum altitude in meters
+safety_margin: 0.2     # Safety margin from bounds in meters
+
+# ============================================================================
+# NEW: Yaw Control Parameters
+# ============================================================================
+# Yaw threshold - rotate only if delta exceeds this (degrees)
+yaw_threshold: 5.0
+
+# Position verification after movement
+verify_position: true
+
+# ============================================================================
+# Candidate Generation Bounds
+# ============================================================================
+# All ranges in meters, camera-relative coordinates
+# x-axis: lateral (negative = left, positive = right)
+# y-axis: depth (positive = forward)
+# z-axis: vertical (negative = down, positive = up)
+
+# Extended ranges for better coverage
+depth_range: [0.5, 3.0]         # Forward distance range (extended)
+lateral_range: [-2.0, 2.0]      # Left/right range (extended)
+vertical_range: [-1.0, 1.0]     # Up/down range (extended)
+
+# ============================================================================
+# Image and Camera Configuration
+# ============================================================================
+image_width: 1920
+image_height: 1080
+camera_name: "0"
+
+# Field of view (degrees)
+fov_horizontal: 90.0
+fov_vertical: 90.0
+
+# ============================================================================
+# Processing Configuration
+# ============================================================================
+# Delay in seconds between navigation cycles
+# 0 = no delay (continuous operation)
+# 1-2 = recommended for testing
+command_loop_delay: 1
+
+# ============================================================================
+# AirSim Movement Configuration
+# ============================================================================
+base_velocity: 2.0               # Base velocity in m/s
+base_yaw_rate: 30.0              # Base yaw rate in degrees/s
+min_command_duration: 2.0        # Minimum duration for movement commands
+
+# ============================================================================
+# Integration with see-point-fly
+# ============================================================================
+# Path to see-point-fly's AirSim config (for command conversion)
+spf_config_path: "../see-point-fly/config_airsim.yaml"
+
+# ============================================================================
+# Visualization and Logging
+# ============================================================================
+# Save iteration visualizations and results
+save_iterations: true
+
+# Output directory for visualizations
+# Timestamped subdirectories will be created
+output_dir: "pivot_visualizations"
+
+# ============================================================================
+# Navigation
+# ============================================================================
+# Default instruction if none provided via command line
+default_instruction: "fly to the red car"
+
+# ============================================================================
+# Advanced Options
+# ============================================================================
+# Wind simulation (if needed, matches see-point-fly format)
+# NED frame: North, East, Down in m/s
+wind_x: 0.0
+wind_y: 0.0
+wind_z: 0.0

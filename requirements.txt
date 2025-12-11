@@ -1,0 +1,15 @@
+# PIVOT Requirements
+# Python 3.10+
+
+# AirSim and simulation
+airsim>=1.8.1
+msgpack<1.0  # AirSim 1.8.1 Python client expects msgpack encoding kwargs
+
+# Core dependencies
+numpy>=1.26,<2.3
+opencv-python>=4.11.0.86
+pyyaml>=6.0.2
+
+# VLM APIs (via see-point-fly)
+google-genai>=1.35.0
+openai>=1.107.0
