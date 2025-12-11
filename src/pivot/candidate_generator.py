@@ -235,9 +235,8 @@ class CandidateGenerator:
             json.JSONDecodeError: If VLM response is invalid JSON
         """
         import json
-        import sys
-        sys.path.append('/home/as06047/github/see-point-fly/src')
-        from spf.clients.vlm_client import VLMClient
+        # Use PIVOT's own VLMClient (no external dependency)
+        from .vlm_client import VLMClient
 
         # Phase 1: Query VLM for relevant 2D regions
         prompt = f"""You are analyzing a drone camera view for navigation.

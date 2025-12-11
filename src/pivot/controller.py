@@ -10,13 +10,9 @@ import json
 import time
 import cv2
 import numpy as np
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
-
-# Import from see-point-fly
 import sys
-sys.path.append('/home/as06047/github/see-point-fly/src')
-from spf.clients.vlm_client import VLMClient
 
 # Import PIVOT components
 from .candidate_generator import CandidateGenerator
@@ -24,6 +20,8 @@ from .visual_overlay import VisualOverlay
 from .trajectory import Trajectory
 from .executor import TrajectoryExecutor
 from .safety import SafetyChecker
+from .vlm_client import VLMClient
+from .visualization import PivotVisualizer
 
 
 class PivotController:
@@ -92,16 +90,25 @@ class PivotController:
         # Frame re-capture settings
         self.enable_closed_loop = config.get('enable_closed_loop', True)
         self.frame_recapture_interval = config.get('frame_recapture_interval', 1)
+        self.enable_depth_gating = config.get('enable_depth_gating', False)
 
         # Visualization settings
         self.save_iterations = config.get('save_iterations', True)
         self.output_dir = config.get('output_dir', 'pivot_visualizations')
 
-        # Create output directory with timestamp
+        # Create root output directory with timestamp; per-navigation runs go inside this folder
         self.timestamp = time.strftime("%Y%m%d_%H%M%S")
         self.session_dir = os.path.join(self.output_dir, self.timestamp)
         if self.save_iterations:
             os.makedirs(self.session_dir, exist_ok=True)
+
+        # Advanced visualizations (paper-style)
+        self.enable_advanced_viz = config.get('enable_advanced_visualization', True)
+
+        # Track iteration images for composite visualization (reset per navigation run)
+        self.iteration_images = []
+        self.initial_frame = None  # Store for before/after comparison
+        self.run_counter = 0
 
         print(f"[PivotController] Initialized with {config.get('num_candidates', 8)} candidates")
         print(f"[PivotController] Max iterations: {self.max_iterations}")
@@ -126,9 +133,23 @@ class PivotController:
                 - execution: Execution result
                 - iteration_history: List of selections per iteration
         """
+        self.run_counter += 1
+        run_timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(self.session_dir, f"run_{self.run_counter:03d}_{run_timestamp}")
+        if self.save_iterations:
+            os.makedirs(run_dir, exist_ok=True)
+
+        # Reset per-run visualization buffers
+        self.iteration_images = []
+        self.initial_frame = None
+
+        # Create a run-scoped visualizer to avoid overwriting artifacts across runs
+        visualizer = PivotVisualizer(run_dir) if self.enable_advanced_viz else None
+
         print(f"\n{'='*60}")
         print(f"PIVOT NAVIGATION: {instruction}")
         print(f"{'='*60}")
+        print(f"[Output] Artifacts for this run: {run_dir}")
 
         # Phase 1: Generate initial candidates
         print("\n[Phase 1] Generating initial candidates...")
@@ -143,32 +164,55 @@ class PivotController:
         # Apply safety filtering
         if self.enable_safety:
             print("\n[Safety] Filtering unsafe candidates...")
-            candidates = self.safety_checker.filter_unsafe_candidates(candidates)
+            depth_map = self._capture_depth_map() if self.enable_depth_gating else None
+            candidates = self.safety_checker.filter_unsafe_candidates(
+                candidates,
+                depth_map=depth_map,
+                overlay=self.overlay
+            )
             print(f"[Safety] {len(candidates)} safe candidates remaining")
 
         best_trajectory = None
         search_radius = 1.0  # Initial search radius
         iteration_history = []
+        execution_results = []  # Track all executions
 
-        # Phase 2: Iterative refinement loop with frame re-capture
+        # Phase 2: Iterative refinement BEFORE execution (paper-aligned)
         for iteration in range(self.max_iterations):
             print(f"\n{'='*60}")
             print(f"PIVOT Iteration {iteration + 1}/{self.max_iterations}")
             print(f"{'='*60}")
 
-            # Re-capture frame if closed-loop enabled (after first iteration)
-            if self.enable_closed_loop and iteration > 0:
-                if iteration % self.frame_recapture_interval == 0:
-                    print(f"[Closed-Loop] Re-capturing frame for iteration {iteration + 1}")
-                    current_frame = self._capture_fresh_frame()
-                    print(f"[Closed-Loop] Frame updated")
+            # Optional recapture before each iteration to reflect scene changes
+            if self.enable_closed_loop and (iteration == 0 or (iteration % max(self.frame_recapture_interval, 1) == 0)):
+                fresh_frame = self._capture_fresh_frame()
+                if fresh_frame is not None:
+                    current_frame = fresh_frame
+                    print(f"[Closed-Loop] Frame refreshed for iteration {iteration + 1}")
+                else:
+                    print(f"[Closed-Loop] WARNING: Frame capture failed; using previous frame")
 
-            # Overlay candidates on current frame (not frozen!)
+            # Optional depth map capture for obstacle gating
+            depth_map = None
+            if self.enable_depth_gating:
+                depth_map = self._capture_depth_map()
+                if depth_map is None:
+                    print("[Depth] WARNING: Depth capture failed; skipping depth gating this iteration")
+
+            # Overlay candidates on current frame
             annotated_image = self.overlay.overlay_candidates(current_frame, candidates)
 
-            # Save visualization
+            # Store iteration image for composite visualization
+            if self.enable_advanced_viz:
+                self.iteration_images.append(annotated_image.copy())
+
+            # Store initial frame for before/after comparison
+            if iteration == 0 and self.initial_frame is None:
+                self.initial_frame = current_frame.copy()
+
+            # Save visualization (per-iteration)
             if self.save_iterations:
-                self._save_iteration_viz(annotated_image, iteration, candidates)
+                self._save_iteration_viz(annotated_image, iteration, candidates, run_dir)
 
             # Query VLM for selection
             print(f"[Iteration {iteration + 1}] Querying VLM with {len(candidates)} candidates...")
@@ -197,7 +241,7 @@ class PivotController:
             print(f"[Iteration {iteration + 1}] Confidence: {confidence:.3f}")
             print(f"[Iteration {iteration + 1}] Reasoning: {reasoning}")
 
-            # Check convergence
+            # Check convergence BEFORE execution (paper loop)
             if confidence >= self.convergence_threshold:
                 print(f"\n✓ Converged at iteration {iteration + 1} (confidence: {confidence:.3f} >= {self.convergence_threshold})")
                 break
@@ -206,7 +250,7 @@ class PivotController:
                 print(f"\n→ Maximum iterations reached ({self.max_iterations})")
                 break
 
-            # Refine candidates around best selection
+            # Refine candidates around new position
             search_radius *= self.refinement_factor
             print(f"\n[Refinement] Reducing search radius to {search_radius:.3f}")
             candidates = self.candidate_gen.refine_candidates(
@@ -218,23 +262,49 @@ class PivotController:
 
             # Apply safety filtering to refined candidates
             if self.enable_safety:
-                candidates = self.safety_checker.filter_unsafe_candidates(candidates)
+                candidates = self.safety_checker.filter_unsafe_candidates(
+                    candidates,
+                    depth_map=depth_map,
+                    overlay=self.overlay
+                )
                 print(f"[Safety] {len(candidates)} safe refined candidates")
 
-        # Phase 3: Execute selected trajectory
-        print(f"\n{'='*60}")
-        print(f"EXECUTING SELECTED TRAJECTORY")
-        print(f"{'='*60}")
-        print(f"Trajectory: {best_trajectory}")
+            # Save progressive refinement snapshot per iteration (pre-execution)
+            if self.save_iterations and self.enable_advanced_viz and visualizer:
+                progressive_path = os.path.join(
+                    run_dir,
+                    f"progressive_refinement_iter_{iteration + 1}.jpg"
+                )
+                print(f"[Viz] Saving progressive refinement snapshot to {progressive_path}")
+                visualizer.create_progressive_refinement(
+                    self.iteration_images,
+                    iteration_history,
+                    progressive_path
+                )
+            else:
+                print("[Viz] Skipping progressive refinement snapshot (advanced viz disabled or unavailable)")
 
-        execution_result = self.executor.execute_trajectory(best_trajectory)
+        # Aggregate execution results
+        # Execute the selected trajectory once after refinement
+        print(f"\n[Execute] Running selected trajectory {best_trajectory.id} after refinement loop")
+        execution_result_single = self.executor.execute_trajectory(best_trajectory)
+        execution_results.append(execution_result_single)
+
+        execution_result = {
+            'all_executions': execution_results,
+            'total_executions': len(execution_results),
+            'final_trajectory_id': best_trajectory.id if best_trajectory else None,
+            'success': execution_result_single.get('success', True)
+        }
 
         # Save final result
         if self.save_iterations:
             self._save_final_result(
                 best_trajectory,
                 iteration_history,
-                execution_result
+                execution_result,
+                run_dir,
+                visualizer
             )
 
         print(f"\n✓ PIVOT navigation completed in {len(iteration_history)} iterations")
@@ -349,17 +419,18 @@ IMPORTANT:
     def _save_iteration_viz(self,
                            annotated_image: np.ndarray,
                            iteration: int,
-                           candidates: List[Trajectory]):
+                           candidates: List[Trajectory],
+                           run_dir: str):
         """Save visualization for this iteration"""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         img_filename = f"iteration_{iteration + 1}_{timestamp}.jpg"
-        img_path = os.path.join(self.session_dir, img_filename)
+        img_path = os.path.join(run_dir, img_filename)
 
         cv2.imwrite(img_path, annotated_image)
 
         # Save candidate metadata
         json_filename = f"iteration_{iteration + 1}_{timestamp}.json"
-        json_path = os.path.join(self.session_dir, json_filename)
+        json_path = os.path.join(run_dir, json_filename)
 
         metadata = {
             'iteration': iteration + 1,
@@ -385,9 +456,11 @@ IMPORTANT:
     def _save_final_result(self,
                           trajectory: Trajectory,
                           iteration_history: List[Dict],
-                          execution_result: Dict):
+                          execution_result: Dict,
+                          run_dir: str,
+                          visualizer: Optional[PivotVisualizer]):
         """Save final result summary"""
-        result_file = os.path.join(self.session_dir, "final_result.json")
+        result_file = os.path.join(run_dir, "final_result.json")
 
         result_data = {
             'timestamp': self.timestamp,
@@ -411,34 +484,95 @@ IMPORTANT:
 
         print(f"\nFinal result saved to: {result_file}")
 
+        # Create advanced visualizations if enabled
+        if self.enable_advanced_viz and visualizer and len(self.iteration_images) >= 2:
+            print("\n[Viz] Generating paper-style visualizations...")
+
+            # Progressive refinement composite (side-by-side iterations)
+            composite_path = os.path.join(run_dir, "progressive_refinement.jpg")
+            visualizer.create_progressive_refinement(
+                self.iteration_images,
+                iteration_history,
+                composite_path
+            )
+
+            # Search space and confidence plots
+            plot_path = os.path.join(run_dir, "search_space.png")
+            visualizer.create_search_space_visualization(
+                iteration_history,
+                plot_path
+            )
+
     def _capture_fresh_frame(self) -> np.ndarray:
         """
         Re-capture frame from AirSim for closed-loop iteration
 
         Returns:
-            Fresh camera frame as numpy array (BGR format)
+            Fresh camera frame as numpy array (BGR format), or None on failure
         """
         import airsim
 
         try:
+            # Use camera_name from config instead of hardcoded "0"
+            camera_name = self.config.get('camera_name', '0')
+
             # Capture image from AirSim
             responses = self.client.simGetImages([
-                airsim.ImageRequest("0", airsim.ImageType.Scene, False, False)
+                airsim.ImageRequest(camera_name, airsim.ImageType.Scene, False, False)
             ])
 
             if responses and len(responses) > 0:
                 # Convert to numpy array
                 img_response = responses[0]
-                img1d = np.frombuffer(img_response.image_data_uint8, dtype=np.uint8)
-                img_rgb = img1d.reshape(img_response.height, img_response.width, 3)
 
-                # Convert RGB to BGR for OpenCV
-                img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                return img_bgr
+                # Check that image data exists before processing
+                if img_response.image_data_uint8:
+                    img1d = np.frombuffer(img_response.image_data_uint8, dtype=np.uint8)
+                    img_rgb = img1d.reshape(img_response.height, img_response.width, 3)
+
+                    # Convert RGB to BGR for OpenCV
+                    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+                    return img_bgr
+                else:
+                    print("[Controller] Warning: Empty image data")
+                    return None
             else:
-                print("[Controller] Warning: No image response, using previous frame")
+                print("[Controller] Warning: No image response")
                 return None
 
         except Exception as e:
             print(f"[Controller] Error capturing frame: {e}")
+            return None
+
+    def _capture_depth_map(self) -> Optional[np.ndarray]:
+        """
+        Capture a depth map from AirSim for depth-based gating.
+
+        Returns:
+            Depth map as numpy array (H, W) in meters, or None on failure
+        """
+        import airsim
+
+        try:
+            camera_name = self.config.get('camera_name', '0')
+            # DepthPlanar is the current AirSim depth type; DepthPlanner is legacy.
+            responses = self.client.simGetImages([
+                airsim.ImageRequest(camera_name, airsim.ImageType.DepthPlanar, True, False)
+            ])
+
+            if not responses:
+                print("[Depth] Warning: No depth response")
+                return None
+
+            response = responses[0]
+            if not response.image_data_float:
+                print("[Depth] Warning: Empty depth data")
+                return None
+
+            depth_array = np.array(response.image_data_float, dtype=np.float32)
+            depth_image = depth_array.reshape(response.height, response.width)
+            return depth_image
+
+        except Exception as e:
+            print(f"[Depth] Error capturing depth map: {e}")
             return None

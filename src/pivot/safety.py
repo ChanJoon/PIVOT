@@ -6,7 +6,8 @@ unsafe operations and workspace violations.
 """
 
 import math
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
+import numpy as np
 from .trajectory import Trajectory, Waypoint
 
 
@@ -19,6 +20,7 @@ class SafetyChecker:
     - Velocity limits
     - Altitude constraints
     - Trajectory feasibility
+    - Optional depth-based obstacle gating
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -46,6 +48,7 @@ class SafetyChecker:
 
         # Safety margins
         self.safety_margin = config.get('safety_margin', 0.2)  # 20cm margin
+        self.depth_gate_margin = config.get('depth_gate_margin', 0.3)  # meters
 
         print(f"[SafetyChecker] Initialized with bounds: {self.workspace_bounds}")
         print(f"[SafetyChecker] Max velocity: {self.max_velocity} m/s")
@@ -197,7 +200,9 @@ class SafetyChecker:
     def filter_unsafe_candidates(
         self,
         candidates: List[Trajectory],
-        current_state: Dict[str, Any] = None
+        current_state: Dict[str, Any] = None,
+        depth_map: Optional[np.ndarray] = None,
+        overlay: Optional[Any] = None
     ) -> List[Trajectory]:
         """
         Remove unsafe candidates before VLM selection
@@ -205,6 +210,8 @@ class SafetyChecker:
         Args:
             candidates: List of candidate trajectories
             current_state: Current drone state
+            depth_map: Optional depth image (meters) aligned with camera
+            overlay: VisualOverlay for projecting waypoints to pixels
 
         Returns:
             List of safe trajectories (at least one, even if unsafe)
@@ -215,11 +222,18 @@ class SafetyChecker:
         for traj in candidates:
             result = self.validate_trajectory(traj, current_state)
 
-            if result['safe']:
+            depth_violation = False
+            if depth_map is not None and overlay is not None:
+                depth_violation = self._check_depth_gate(traj, depth_map, overlay)
+
+            if result['safe'] and not depth_violation:
                 safe_candidates.append(traj)
             else:
                 filtered_count += 1
-                print(f"  [Safety] Filtered candidate {traj.id}: {', '.join(result['violations'][:2])}")
+                reasons = result['violations'][:2]
+                if depth_violation:
+                    reasons.append("depth obstacle along ray")
+                print(f"  [Safety] Filtered candidate {traj.id}: {', '.join(reasons)}")
 
         if not safe_candidates:
             # If all candidates are unsafe, keep the least unsafe one
@@ -238,6 +252,26 @@ class SafetyChecker:
     def get_safe_bounds(self) -> Dict[str, float]:
         """Get the workspace bounds for use in trajectory generation"""
         return self.workspace_bounds.copy()
+
+    def _check_depth_gate(self, trajectory: Trajectory, depth_map: np.ndarray, overlay: Any) -> bool:
+        """
+        Simple obstacle gating using a depth map.
+        If the measured depth along the candidate pixel ray is closer than the waypoint
+        minus a margin, treat as obstructed.
+        """
+        waypoint = trajectory.get_first_waypoint()
+        px, py = overlay.project_3d_to_2d(waypoint)
+
+        try:
+            measured_depth = float(depth_map[py, px])
+        except Exception:
+            return False
+
+        # Invalid depth values are often 0 or very small; ignore gating in that case
+        if measured_depth <= 0.01 or np.isinf(measured_depth) or np.isnan(measured_depth):
+            return False
+
+        return measured_depth + self.depth_gate_margin < waypoint.y
 
     def is_position_safe(self, position: Tuple[float, float, float]) -> bool:
         """

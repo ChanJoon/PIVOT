@@ -54,10 +54,18 @@ multi_step_trajectories: false
 # ============================================================================
 # Re-capture frames during iterative refinement
 # Critical for closed-loop validation
+# NOTE: Currently, iterations run before execution, not during.
+# Frame recapture happens between navigation cycles, not mid-refinement.
+# For true per-iteration closed-loop, set execute_per_iteration=true
 enable_closed_loop: true
 
 # Recapture frame every N iterations (1 = every iteration)
 frame_recapture_interval: 1
+
+# Execute trajectory after each iteration (true closed-loop)
+# false (default) = all iterations before execution
+# true = execute after each iteration, recapture, refine
+execute_per_iteration: false
 
 # Check if goal is reached during iterations
 enable_goal_checking: false  # Future feature
@@ -67,6 +75,9 @@ enable_goal_checking: false  # Future feature
 # ============================================================================
 # Enable safety filtering of unsafe candidates
 enable_safety_checks: true
+
+# Optional: depth-based obstacle gating (requires AirSim depth)
+enable_depth_gating: true
 
 # Workspace bounds (camera-relative coordinates in meters)
 workspace_bounds:
@@ -82,6 +93,8 @@ max_velocity: 3.0      # Maximum velocity in m/s
 min_altitude: 0.5      # Minimum altitude in meters
 max_altitude: 10.0     # Maximum altitude in meters
 safety_margin: 0.2     # Safety margin from bounds in meters
+# Margin for depth obstacle gating (meters)
+depth_gate_margin: 0.3
 
 # ============================================================================
 # NEW: Yaw Control Parameters
@@ -117,6 +130,17 @@ fov_horizontal: 90.0
 fov_vertical: 90.0
 
 # ============================================================================
+# Coordinate Frame Notes
+# ============================================================================
+# Waypoints are in camera-relative coordinates:
+# - dx: lateral (negative=left, positive=right)
+# - dy: forward (positive=forward)
+# - dz: vertical (positive=up)
+#
+# AirSim's body frame already aligns with camera frame for forward-facing cameras.
+# No coordinate transformation is needed.
+
+# ============================================================================
 # Processing Configuration
 # ============================================================================
 # Delay in seconds between navigation cycles
@@ -131,11 +155,6 @@ base_velocity: 2.0               # Base velocity in m/s
 base_yaw_rate: 30.0              # Base yaw rate in degrees/s
 min_command_duration: 2.0        # Minimum duration for movement commands
 
-# ============================================================================
-# Integration with see-point-fly
-# ============================================================================
-# Path to see-point-fly's AirSim config (for command conversion)
-spf_config_path: "../see-point-fly/config_airsim.yaml"
 
 # ============================================================================
 # Visualization and Logging
@@ -147,11 +166,34 @@ save_iterations: true
 # Timestamped subdirectories will be created
 output_dir: "pivot_visualizations"
 
+# Enable enhanced paper-style visualizations
+# Generates progressive refinement composites, before/after comparisons
+enable_advanced_visualization: true
+
 # ============================================================================
 # Navigation
 # ============================================================================
 # Default instruction if none provided via command line
 default_instruction: "fly to the red car"
+
+# ============================================================================
+# NEW: Parallel Execution (Ensemble - Paper Section 3.3)
+# ============================================================================
+# Run E parallel PIVOT instances for robustness
+# 1 = single instance (no parallelism)
+# 3-5 = recommended for robust ensemble execution
+num_parallel_instances: 1
+
+# Result aggregation method
+# "voting" = majority vote on similar trajectories (recommended)
+# "confidence" = weight by VLM confidence scores
+# "average" = average waypoint positions
+aggregation_method: "voting"
+
+# Enable parallel execution
+# false (default) = single PIVOT instance
+# true = run num_parallel_instances in parallel
+enable_parallel_execution: false
 
 # ============================================================================
 # Advanced Options

@@ -174,14 +174,22 @@ def main():
         print("\nCheck your .env file and API keys")
         return 1
 
-    # Initialize PIVOT controller
+    # Initialize PIVOT controller (single or parallel)
     print(f"\n{'='*60}")
     print("Initializing PIVOT Controller")
     print(f"{'='*60}")
 
     try:
-        controller = PivotController(client, vlm_client, config)
-        print("✓ PIVOT controller initialized")
+        # Check if parallel execution is enabled
+        if config.get('enable_parallel_execution', False):
+            from pivot.parallel_controller import ParallelPivotController
+            controller = ParallelPivotController(client, vlm_client, config)
+            print("✓ Parallel PIVOT controller initialized")
+            is_parallel = True
+        else:
+            controller = PivotController(client, vlm_client, config)
+            print("✓ PIVOT controller initialized")
+            is_parallel = False
     except Exception as e:
         print(f"✗ Failed to initialize PIVOT controller: {e}")
         return 1
@@ -229,8 +237,11 @@ def main():
 
             print(f"[Capture] Frame captured: {frame.shape[1]}x{frame.shape[0]}")
 
-            # Run PIVOT navigation
-            result = controller.navigate_with_pivot(frame, instruction)
+            # Run PIVOT navigation (single or parallel)
+            if is_parallel:
+                result = controller.navigate_with_pivot_parallel(frame, instruction)
+            else:
+                result = controller.navigate_with_pivot(frame, instruction)
 
             print(f"\n{'='*60}")
             print(f"CYCLE {cycle_count} SUMMARY")

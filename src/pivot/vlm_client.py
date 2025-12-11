@@ -5,6 +5,7 @@ from openai import OpenAI
 from openai.types.chat import ChatCompletionUserMessageParam
 from dotenv import load_dotenv
 from typing import List
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
 class VLMClient:
     """
@@ -63,9 +64,20 @@ class VLMClient:
             base_url=base_url
         )
 
+    @retry(
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((Exception,)),
+        reraise=True
+    )
     def generate_response(self, prompt: str, image) -> str:
         """
         Generate response from VLM with image and text prompt
+
+        Includes automatic retry with exponential backoff for:
+        - Rate limit errors
+        - Network timeouts
+        - Temporary API failures
 
         Args:
             prompt (str): Text prompt for the model
@@ -73,6 +85,9 @@ class VLMClient:
 
         Returns:
             str: Raw response text from the model
+
+        Raises:
+            Exception: After 3 failed attempts
         """
         # Encode image to base64
         import cv2
