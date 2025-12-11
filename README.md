@@ -1,10 +1,18 @@
 # PIVOT: Prompting with Iterative Visual Optimization
 
-PIVOT is an implementation of the visual prompting framework for drone navigation using Vision-Language Models (VLMs). Unlike single-shot approaches, PIVOT uses iterative refinement to progressively improve navigation decisions.
+PIVOT is a visual-prompting framework for zero-shot drone navigation using Vision-Language Models (VLMs). Instead of producing actions directly, PIVOT overlays candidate trajectories on the input image and asks a VLM to pick the safest or most goal-directed option.
 
-## Overview
+Through iterative refinement, the system repeatedly samples around the VLM-selected candidates, narrowing the search space and improving decisions without any robot-specific training.
 
-**PIVOT** overlays multiple candidate trajectories on camera images and asks a VLM to select the best option. Through multiple iterations, the search space is refined around the best selections, enabling robust zero-shot navigation without task-specific training.
+(See paper: https://arxiv.org/abs/2402.07872)
+
+## Features
+
+- **Visual prompting interface** for VLM-based trajectory selection
+- **Iterative candidate refinement** for improved decision quality
+- **Zero-shot**: no task-specific data or training
+- **AirSim integration** for simulation and evaluation
+- Gemini / OpenAI-compatible API support
 
 ## Installation
 
@@ -18,8 +26,8 @@ PIVOT is an implementation of the visual prompting framework for drone navigatio
 
 1. **Clone and navigate to the repository**:
    ```bash
-   git clone <>
-   cd pivot
+   git clone git@github.com:ChanJoon/PIVOT.git
+   cd PIVOT
    ```
 
 2. **Install dependencies**:
