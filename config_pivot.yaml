@@ -20,7 +20,7 @@ num_candidates: 10
 
 # Maximum number of refinement iterations
 # Recommended: 3-4 for balance of accuracy and VLM cost
-max_iterations: 2
+max_iterations: 3
 
 # Search radius reduction factor per iteration
 # Each iteration reduces search space by this factor
@@ -29,7 +29,7 @@ refinement_factor: 0.5
 
 # Paper-style PIVOT selection: choose top-K candidates each iteration
 # Used in the adapted navigation prompt JSON: {"points":[...]}
-vlm_select_k: 1
+vlm_select_k: 3
 
 # ============================================================================
 # Candidate Generation Bounds
@@ -82,7 +82,7 @@ fov_vertical: 90.0
 # Delay in seconds between navigation cycles
 # 0 = no delay (continuous operation)
 # 1-2 = recommended for testing
-command_loop_delay: 1
+command_loop_delay: 0
 
 # ============================================================================
 # AirSim Movement Configuration
@@ -124,15 +124,10 @@ num_parallel_instances: 3
 # "voting" = majority vote on similar trajectories (recommended)
 # "confidence" = weight by VLM confidence scores
 # "average" = average waypoint positions
-aggregation_method: "vlm"
 # "vlm" = query VLM again to pick best among E final actions (paper Section 3.3 option 2)
+aggregation_method: "vlm"
 
 # Enable parallel execution
 # false (default) = single PIVOT instance
 # true = run num_parallel_instances in parallel
 enable_parallel_execution: true
-
-# ============================================================================
-# Advanced Options
-# ============================================================================
- 

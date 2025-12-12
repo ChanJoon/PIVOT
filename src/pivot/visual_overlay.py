@@ -8,7 +8,7 @@ Projects 3D waypoints to 2D image coordinates and draws visual markers.
 import cv2
 import numpy as np
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Set
 from .trajectory import Trajectory, Waypoint
 
 
@@ -51,10 +51,40 @@ class VisualOverlay:
         self.circle_radius_max = 34
         self.circle_thickness = 3
         self.arrow_thickness = 2
+        # Paper-style label: gray translucent fill + number inside + green border for top-K.
+        self.gray_fill_bgr = (160, 160, 160)
+        self.gray_fill_alpha = 0.55
+        self.text_color_bgr = (255, 255, 255)
+        self.topk_border_bgr = (0, 255, 0)  # green
         # Some OpenCV builds (e.g., headless) lack FONT_HERSHEY_BOLD; fall back to SIMPLEX.
         self.text_font = getattr(cv2, "FONT_HERSHEY_BOLD", cv2.FONT_HERSHEY_SIMPLEX)
         self.text_scale = 1.0
         self.text_thickness = 2
+
+    @staticmethod
+    def _center_text_position(text: str, center: Tuple[int, int], font, scale: float, thickness: int) -> Tuple[int, int]:
+        (tw, th), _baseline = cv2.getTextSize(text, font, scale, thickness)
+        x = int(center[0] - tw / 2)
+        y = int(center[1] + th / 2)
+        return x, y
+
+    def _draw_labeled_circle(
+        self,
+        image: np.ndarray,
+        center: Tuple[int, int],
+        radius: int,
+        border_bgr: Tuple[int, int, int],
+        label: str,
+        border_thickness: int,
+    ) -> None:
+        overlay = image.copy()
+        cv2.circle(overlay, center, radius, self.gray_fill_bgr, thickness=-1)
+        cv2.addWeighted(overlay, self.gray_fill_alpha, image, 1.0 - self.gray_fill_alpha, 0, image)
+
+        cv2.circle(image, center, radius, border_bgr, thickness=border_thickness)
+
+        pos = self._center_text_position(label, center, self.text_font, self.text_scale, self.text_thickness)
+        cv2.putText(image, label, pos, self.text_font, self.text_scale, self.text_color_bgr, self.text_thickness)
 
     def project_3d_to_2d(self, waypoint: Waypoint) -> Tuple[int, int]:
         """
@@ -137,7 +167,8 @@ class VisualOverlay:
 
     def overlay_candidates(self,
                           image: np.ndarray,
-                          trajectories: List[Trajectory]) -> np.ndarray:
+                          trajectories: List[Trajectory],
+                          topk_ids: Optional[Set[int]] = None) -> np.ndarray:
         """
         Draw all candidate trajectories on the image
 
@@ -156,6 +187,7 @@ class VisualOverlay:
         """
         annotated = image.copy()
         center = (self.image_width // 2, self.image_height // 2)
+        topk_ids = topk_ids or set()
 
         depths = [float(t.get_first_waypoint().y) for t in trajectories] if trajectories else []
         min_depth = min(depths) if depths else 0.5
@@ -177,16 +209,16 @@ class VisualOverlay:
                 inv = 1.0 - float(np.clip(t, 0.0, 1.0))
                 radius = int(round(self.circle_radius_min + inv * (self.circle_radius_max - self.circle_radius_min)))
 
-            # Draw circle at waypoint
-            cv2.circle(annotated, waypoint_2d, radius,
-                      color_bgr, self.circle_thickness)
-
-            # Draw ID label next to circle
-            label_pos = (waypoint_2d[0] + radius + 10,
-                        waypoint_2d[1] + 5)
-            cv2.putText(annotated, str(traj.id), label_pos,
-                       self.text_font, self.text_scale, color_bgr,
-                       self.text_thickness)
+            border = self.topk_border_bgr if traj.id in topk_ids else color_bgr
+            border_thickness = self.circle_thickness + (1 if traj.id in topk_ids else 0)
+            self._draw_labeled_circle(
+                annotated,
+                waypoint_2d,
+                radius,
+                border_bgr=border,
+                label=str(traj.id),
+                border_thickness=border_thickness,
+            )
 
             # Draw arrow from center to waypoint
             cv2.arrowedLine(annotated, center, waypoint_2d,
@@ -281,17 +313,14 @@ class VisualOverlay:
     def overlay_candidates_with_selection(self,
                                          image: np.ndarray,
                                          trajectories: List[Trajectory],
-                                         selected_id: int) -> np.ndarray:
+                                         selected_id: int,
+                                         selected_ids: Optional[List[int]] = None) -> np.ndarray:
         """
-        Draw all candidate trajectories with the selected one highlighted
+        Draw all candidates and highlight the top-K selections with green borders.
 
-        The selected trajectory is drawn with:
-        - Thicker, brighter circle
-        - Larger text
-        - "SELECTED" label
-        - Pulsing effect (double circle)
-
-        Non-selected trajectories are dimmed (semi-transparent)
+        Notes:
+        - `selected_id` is the BEST (rank-1) selection.
+        - `selected_ids` (optional) is the full top-K list; when provided, those IDs get green borders.
 
         Args:
             image: Input image (BGR format)
@@ -301,88 +330,15 @@ class VisualOverlay:
         Returns:
             Annotated image with selected trajectory highlighted
         """
-        annotated = image.copy()
-        center = (self.image_width // 2, self.image_height // 2)
+        topk = set(selected_ids) if selected_ids is not None else {selected_id}
+        annotated = self.overlay_candidates(image, trajectories, topk_ids=topk)
 
-        # Colors for selection highlighting
-        highlight_color = (0, 255, 0)  # Bright green for selected
-        dim_alpha = 0.4  # Transparency for non-selected
-
-        # First pass: Draw non-selected trajectories (dimmed)
+        # Best gets an extra outer green ring for clarity.
         for traj in trajectories:
-            if traj.id == selected_id:
-                continue  # Skip selected, will draw later
-
-            waypoint = traj.get_first_waypoint()
-            waypoint_2d = self.project_3d_to_2d(waypoint)
-            color_bgr = (traj.color[2], traj.color[1], traj.color[0])
-
-            # Dim the color
-            dimmed_color = tuple(int(c * dim_alpha) for c in color_bgr)
-
-            # Draw dimmed circle
-            cv2.circle(annotated, waypoint_2d, self.circle_radius,
-                      dimmed_color, self.circle_thickness)
-
-            # Draw dimmed ID label
-            label_pos = (waypoint_2d[0] + self.circle_radius + 10,
-                        waypoint_2d[1] + 5)
-            cv2.putText(annotated, str(traj.id), label_pos,
-                       self.text_font, self.text_scale * 0.8, dimmed_color,
-                       self.text_thickness - 1)
-
-            # Draw dimmed arrow
-            cv2.arrowedLine(annotated, center, waypoint_2d,
-                          dimmed_color, self.arrow_thickness - 1,
-                          tipLength=0.15)
-
-        # Second pass: Draw selected trajectory (highlighted)
-        selected_traj = None
-        for traj in trajectories:
-            if traj.id == selected_id:
-                selected_traj = traj
-                break
-
-        if selected_traj is not None:
-            waypoint = selected_traj.get_first_waypoint()
-            waypoint_2d = self.project_3d_to_2d(waypoint)
-
-            # Draw pulsing effect (double circle)
-            cv2.circle(annotated, waypoint_2d, self.circle_radius + 10,
-                      highlight_color, 2)
-            cv2.circle(annotated, waypoint_2d, self.circle_radius,
-                      highlight_color, self.circle_thickness + 2)
-
-            # Draw thick arrow
-            cv2.arrowedLine(annotated, center, waypoint_2d,
-                          highlight_color, self.arrow_thickness + 2,
-                          tipLength=0.2)
-
-            # Draw ID label (larger and brighter)
-            label_pos = (waypoint_2d[0] + self.circle_radius + 15,
-                        waypoint_2d[1] + 8)
-            cv2.putText(annotated, str(selected_traj.id), label_pos,
-                       self.text_font, self.text_scale * 1.3, highlight_color,
-                       self.text_thickness + 2)
-
-            # Add "SELECTED" label at top
-            selected_label = f"SELECTED: Option #{selected_id}"
-            # Measure text size for background
-            text_size = cv2.getTextSize(selected_label, self.text_font,
-                                       1.2, 3)[0]
-
-            # Draw semi-transparent background
-            overlay = annotated.copy()
-            cv2.rectangle(overlay, (10, 10),
-                         (text_size[0] + 30, 70),
-                         (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.7, annotated, 0.3, 0, annotated)
-
-            # Draw text
-            cv2.putText(annotated, selected_label, (20, 50),
-                       self.text_font, 1.2, highlight_color, 3)
-
-        # Draw center reference point
-        cv2.circle(annotated, center, 5, (128, 128, 128), -1)
+            if traj.id != selected_id:
+                continue
+            waypoint_2d = self.project_3d_to_2d(traj.get_first_waypoint())
+            cv2.circle(annotated, waypoint_2d, self.circle_radius_max + 8, self.topk_border_bgr, thickness=2)
+            break
 
         return annotated

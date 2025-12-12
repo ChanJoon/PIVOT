@@ -176,7 +176,8 @@ class PivotController:
             highlighted_image = self.overlay.overlay_candidates_with_selection(
                 current_frame,
                 candidates,
-                best_trajectory.id
+                best_trajectory.id,
+                selected_ids=selected_ids
             )
 
             # Store iteration image for composite visualization (paper-style panels)
@@ -319,7 +320,7 @@ The arrow shows the direction from the drone (image center) to that waypoint.
 Your task is to choose which circles you should pick for the task of: {instruction}
 
 Choose the {k} best candidate numbers.
-Do NOT choose routes that would go through obstacles or unsafe gaps.
+Do NOT choose routes that would go through obstacles, ground or unsafe gaps.
 Skip analysis and provide your answer at the end in a json file of this form:
 {{"points": []}}
 
