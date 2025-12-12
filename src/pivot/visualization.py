@@ -4,7 +4,7 @@ Enhanced Visualization for PIVOT
 Creates paper-style visualizations matching PIVOT paper figures:
 - Progressive refinement composites (side-by-side iterations)
 - Before/after comparisons
-- Iteration progression with confidence scores
+- Iteration progression (optional confidence)
 - Search space shrinking visualization
 
 Based on PIVOT paper Figures 1-2
@@ -56,7 +56,7 @@ class PivotVisualizer:
         Each panel shows:
         - Iteration number
         - Selected option ID
-        - VLM confidence score
+        - (Optional) confidence score
         - Search radius
 
         Args:
@@ -98,10 +98,15 @@ class PivotVisualizer:
                        self.font_small, self.font_scale_small, self.color_yellow,
                        self.font_thickness_normal)
 
-            # Confidence score
-            confidence = data.get('confidence', 0.0)
-            conf_text = f"Confidence: {confidence:.3f}"
-            conf_color = self.color_green if confidence >= 0.9 else self.color_yellow
+            # Confidence score (optional)
+            confidence = data.get('confidence', None)
+            if confidence is None:
+                conf_text = "Confidence: n/a"
+                conf_color = self.color_yellow
+            else:
+                confidence_f = float(confidence)
+                conf_text = f"Confidence: {confidence_f:.3f}"
+                conf_color = self.color_green if confidence_f >= 0.9 else self.color_yellow
             cv2.putText(img, conf_text, (15, 100),
                        self.font_small, self.font_scale_small, conf_color,
                        self.font_thickness_normal)
@@ -204,11 +209,7 @@ class PivotVisualizer:
                                          iterations: List[Dict],
                                          output_path: str):
         """
-        Visualize search space shrinking and confidence progression
-
-        Creates a 2-panel plot:
-        - Left: Search radius over iterations (shows convergence)
-        - Right: VLM confidence over iterations (shows quality)
+        Visualize search space shrinking (refinement) over iterations
 
         Args:
             iterations: List of iteration metadata dicts
@@ -224,9 +225,7 @@ class PivotVisualizer:
 
         iterations_num = [d['iteration'] for d in iterations]
         radii = [d['search_radius'] for d in iterations]
-        confidences = [d['confidence'] for d in iterations]
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        fig, ax1 = plt.subplots(1, 1, figsize=(7, 5))
 
         # Plot 1: Search radius (shows refinement)
         ax1.plot(iterations_num, radii, 'o-', linewidth=3, markersize=10, color='#2E86AB')
@@ -239,22 +238,6 @@ class PivotVisualizer:
         # Add value labels on points
         for i, (x, y) in enumerate(zip(iterations_num, radii)):
             ax1.annotate(f'{y:.2f}m', (x, y), textcoords="offset points",
-                        xytext=(0,10), ha='center', fontsize=10)
-
-        # Plot 2: Confidence (shows quality improvement)
-        ax2.plot(iterations_num, confidences, 'o-', linewidth=3, markersize=10, color='#06A77D')
-        ax2.set_xlabel('Iteration', fontsize=14, fontweight='bold')
-        ax2.set_ylabel('VLM Confidence', fontsize=14, fontweight='bold')
-        ax2.set_title('Confidence Progression', fontsize=16, fontweight='bold')
-        ax2.set_ylim([0, 1.05])
-        ax2.axhline(y=0.9, color='red', linestyle='--', label='Convergence Threshold', alpha=0.7)
-        ax2.grid(True, alpha=0.3, linestyle='--')
-        ax2.set_xticks(iterations_num)
-        ax2.legend(fontsize=10)
-
-        # Add value labels on points
-        for i, (x, y) in enumerate(zip(iterations_num, confidences)):
-            ax2.annotate(f'{y:.3f}', (x, y), textcoords="offset points",
                         xytext=(0,10), ha='center', fontsize=10)
 
         plt.tight_layout()

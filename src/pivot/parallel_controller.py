@@ -8,12 +8,17 @@ Based on PIVOT paper Section 3.3: "Robust PIVOT with Parallel Calls"
 
 import concurrent.futures
 import copy
+import os
+import time
+import cv2
 import numpy as np
 from typing import List, Dict, Any
 from collections import Counter
 
 from .controller import PivotController
 from .trajectory import Trajectory, Waypoint
+from .visual_overlay import VisualOverlay
+from .vlm_client import VLMClient
 
 
 class ParallelPivotController:
@@ -41,8 +46,17 @@ class ParallelPivotController:
         """
         self.client = airsim_client
         self.config = config
+        self.vlm = vlm_client
         self.num_instances = config.get('num_parallel_instances', 1)
         self.aggregation_method = config.get('aggregation_method', 'voting')
+        self.save_iterations = config.get('save_iterations', True)
+        self.output_dir = config.get('output_dir', 'pivot_visualizations')
+
+        # Create a single output directory for the parallel run (suppress per-instance artifacts).
+        self.timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.session_dir = os.path.join(self.output_dir, self.timestamp)
+        if self.save_iterations:
+            os.makedirs(self.session_dir, exist_ok=True)
 
         print(f"\n[ParallelPIVOT] Initializing with {self.num_instances} parallel instances")
         print(f"[ParallelPIVOT] Aggregation method: {self.aggregation_method}")
@@ -55,10 +69,21 @@ class ParallelPivotController:
             instance_vlm = self._clone_vlm_client(vlm_client)
 
             # Create controller instance
-            controller = PivotController(airsim_client, instance_vlm, config)
+            instance_config = dict(config)
+            instance_config['save_iterations'] = False
+            instance_config['enable_advanced_visualization'] = False
+            instance_config['execute_selected_trajectory'] = False
+            instance_config['collect_iteration_artifacts'] = True
+            controller = PivotController(airsim_client, instance_vlm, instance_config)
             self.controllers.append(controller)
 
         print(f"[ParallelPIVOT] Created {len(self.controllers)} controller instances")
+        self.overlay = VisualOverlay(
+            image_width=config.get('image_width', 1920),
+            image_height=config.get('image_height', 1080),
+            fov_horizontal=config.get('fov_horizontal', 90.0),
+            fov_vertical=config.get('fov_vertical', 90.0)
+        )
 
     def _clone_vlm_client(self, vlm_client):
         """
@@ -138,7 +163,7 @@ class ParallelPivotController:
 
         # Aggregate results
         print(f"\n[ParallelPIVOT] Aggregating {len(results)} results...")
-        aggregated = self._aggregate_results(results)
+        aggregated = self._aggregate_results(results, current_frame, instruction)
 
         # Execute aggregated trajectory
         print(f"\n[ParallelPIVOT] Executing aggregated trajectory...")
@@ -147,6 +172,37 @@ class ParallelPivotController:
         execution_result = executor_instance.execute_trajectory(aggregated['selected_trajectory'])
 
         aggregated['execution'] = execution_result
+
+        # Save only the chosen instance's iteration artifacts (+ final selection).
+        if self.save_iterations:
+            run_timestamp = time.strftime("%Y%m%d_%H%M%S")
+            run_dir = os.path.join(self.session_dir, f"run_parallel_{run_timestamp}")
+            os.makedirs(run_dir, exist_ok=True)
+
+            artifacts = aggregated.get('iteration_artifacts', [])
+            for item in artifacts:
+                it = item.get('iteration', 0)
+                cand_bytes = item.get('candidates_jpg')
+                sel_bytes = item.get('selected_jpg')
+                if cand_bytes:
+                    out_path = os.path.join(run_dir, f"iteration_{it:02d}_candidates.jpg")
+                    with open(out_path, "wb") as f:
+                        f.write(cand_bytes)
+                if sel_bytes:
+                    out_path = os.path.join(run_dir, f"iteration_{it:02d}_selected.jpg")
+                    with open(out_path, "wb") as f:
+                        f.write(sel_bytes)
+
+            final_traj = aggregated['selected_trajectory']
+            single = Trajectory(
+                waypoints=[final_traj.get_first_waypoint()],
+                id=1,
+                color=(0, 255, 0)
+            )
+            final_image = self.overlay.overlay_candidates_with_selection(current_frame, [single], selected_id=1)
+            final_path = os.path.join(run_dir, "final_selected.jpg")
+            cv2.imwrite(final_path, final_image)
+            print(f"[Viz] Saved final selection: {final_path}")
 
         print(f"\n[ParallelPIVOT] ✓ Parallel execution complete")
         return aggregated
@@ -189,31 +245,80 @@ class ParallelPivotController:
             print(f"[ParallelPIVOT] Instance {instance_id} FAILED: {e}")
             raise
 
-    def _aggregate_results(self, results: List[Dict]) -> Dict[str, Any]:
+    def _aggregate_results(self, results: List[Dict], current_frame: np.ndarray, instruction: str) -> Dict[str, Any]:
         """
-        Aggregate results from E parallel instances
-
-        Methods:
-        - 'voting': Select trajectory that appears most frequently
-        - 'confidence': Weight by VLM confidence scores
-        - 'average': Average waypoint positions
-
-        Args:
-            results: List of PIVOT results from parallel instances
-
-        Returns:
-            Aggregated result with selected trajectory
+        Aggregate results from E parallel instances (frame-aware for VLM rerank).
         """
+        if self.aggregation_method == 'vlm':
+            return self._aggregate_by_vlm_rerank(results, current_frame, instruction)
+        # Delegate to the frame-free methods.
+        return self._aggregate_results_frame_free(results)
+
+    def _aggregate_results_frame_free(self, results: List[Dict]) -> Dict[str, Any]:
         if self.aggregation_method == 'voting':
             return self._aggregate_by_voting(results)
-        elif self.aggregation_method == 'confidence':
+        if self.aggregation_method == 'confidence':
             return self._aggregate_by_confidence(results)
-        elif self.aggregation_method == 'average':
+        if self.aggregation_method == 'average':
             return self._aggregate_by_averaging(results)
-        else:
-            # Fallback: return highest confidence result
-            print(f"[ParallelPIVOT] Unknown aggregation method '{self.aggregation_method}', using confidence")
+        print(f"[ParallelPIVOT] Unknown aggregation method '{self.aggregation_method}', using confidence")
+        return self._aggregate_by_confidence(results)
+
+    def _aggregate_by_vlm_rerank(self, results: List[Dict], current_frame: np.ndarray, instruction: str) -> Dict[str, Any]:
+        """
+        Paper Section 3.3 option (2): query the VLM again to select the best action among E.
+        """
+        # Build E candidate trajectories from each instance's final selection.
+        rerank_candidates: List[Trajectory] = []
+        for i, r in enumerate(results):
+            traj = r['selected_trajectory']
+            wp = traj.get_first_waypoint()
+            rerank_candidates.append(
+                Trajectory(
+                    waypoints=[Waypoint(x=wp.x, y=wp.y, z=wp.z)],
+                    id=i + 1,
+                    color=(255, 0, 0)  # color overridden by overlay palette anyway
+                )
+            )
+
+        annotated = self.overlay.overlay_candidates(current_frame, rerank_candidates)
+        candidate_ids = [t.id for t in rerank_candidates]
+
+        prompt = f"""You are a drone that cannot fly through obstacles. This is the image you are seeing right now.
+I have annotated it with numbered circles and arrows. Each number represents a candidate waypoint destination you can fly toward.
+The arrow shows the direction from the drone (image center) to that waypoint.
+
+Your task is to choose which single circle you should pick for the task of: {instruction}
+
+Choose the 1 best candidate number.
+Do NOT choose routes that would go through obstacles or unsafe gaps.
+Skip analysis and provide your answer at the end in a json file of this form:
+{{"points": []}}
+
+IMPORTANT:
+- "points" must contain EXACTLY ONE number from: {candidate_ids}
+"""
+
+        try:
+            response_text = self.vlm.generate_response(prompt, annotated)
+            response_text = VLMClient.clean_response_text(response_text)
+            import json
+            response_json = json.loads(response_text)
+            points = response_json.get('points', [])
+            if not isinstance(points, list) or not points:
+                raise ValueError("Missing points")
+            choice = int(points[0])
+            if choice not in candidate_ids:
+                raise ValueError(f"Invalid choice: {choice}")
+        except Exception as e:
+            print(f"[ParallelPIVOT] VLM rerank failed ({e}); falling back to confidence")
             return self._aggregate_by_confidence(results)
+
+        chosen_result = results[choice - 1]
+        chosen_result = dict(chosen_result)
+        chosen_result['aggregation_method'] = 'vlm'
+        chosen_result['rerank_choice'] = choice
+        return chosen_result
 
     def _aggregate_by_voting(self, results: List[Dict]) -> Dict[str, Any]:
         """

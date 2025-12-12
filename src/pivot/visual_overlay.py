@@ -45,6 +45,10 @@ class VisualOverlay:
 
         # Drawing parameters
         self.circle_radius = 20
+        # Encode depth with circle size (paper-style cue: closer appears larger).
+        self.enable_depth_size_cue = True
+        self.circle_radius_min = 14
+        self.circle_radius_max = 34
         self.circle_thickness = 3
         self.arrow_thickness = 2
         # Some OpenCV builds (e.g., headless) lack FONT_HERSHEY_BOLD; fall back to SIMPLEX.
@@ -153,6 +157,11 @@ class VisualOverlay:
         annotated = image.copy()
         center = (self.image_width // 2, self.image_height // 2)
 
+        depths = [float(t.get_first_waypoint().y) for t in trajectories] if trajectories else []
+        min_depth = min(depths) if depths else 0.5
+        max_depth = max(depths) if depths else 3.0
+        depth_span = max(1e-6, max_depth - min_depth)
+
         for traj in trajectories:
             # Get first waypoint (for single-waypoint trajectories)
             waypoint = traj.get_first_waypoint()
@@ -161,12 +170,19 @@ class VisualOverlay:
             # Convert color from RGB to BGR for OpenCV
             color_bgr = (traj.color[2], traj.color[1], traj.color[0])
 
+            radius = self.circle_radius
+            if self.enable_depth_size_cue:
+                # Smaller circles for farther waypoints; larger for closer.
+                t = (float(waypoint.y) - min_depth) / depth_span
+                inv = 1.0 - float(np.clip(t, 0.0, 1.0))
+                radius = int(round(self.circle_radius_min + inv * (self.circle_radius_max - self.circle_radius_min)))
+
             # Draw circle at waypoint
-            cv2.circle(annotated, waypoint_2d, self.circle_radius,
+            cv2.circle(annotated, waypoint_2d, radius,
                       color_bgr, self.circle_thickness)
 
             # Draw ID label next to circle
-            label_pos = (waypoint_2d[0] + self.circle_radius + 10,
+            label_pos = (waypoint_2d[0] + radius + 10,
                         waypoint_2d[1] + 5)
             cv2.putText(annotated, str(traj.id), label_pos,
                        self.text_font, self.text_scale, color_bgr,
@@ -259,5 +275,114 @@ class VisualOverlay:
             text = f"Option {traj.id}"
             cv2.putText(annotated, text, (legend_x + 25, y_pos),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+        return annotated
+
+    def overlay_candidates_with_selection(self,
+                                         image: np.ndarray,
+                                         trajectories: List[Trajectory],
+                                         selected_id: int) -> np.ndarray:
+        """
+        Draw all candidate trajectories with the selected one highlighted
+
+        The selected trajectory is drawn with:
+        - Thicker, brighter circle
+        - Larger text
+        - "SELECTED" label
+        - Pulsing effect (double circle)
+
+        Non-selected trajectories are dimmed (semi-transparent)
+
+        Args:
+            image: Input image (BGR format)
+            trajectories: List of candidate trajectories
+            selected_id: ID of the selected trajectory
+
+        Returns:
+            Annotated image with selected trajectory highlighted
+        """
+        annotated = image.copy()
+        center = (self.image_width // 2, self.image_height // 2)
+
+        # Colors for selection highlighting
+        highlight_color = (0, 255, 0)  # Bright green for selected
+        dim_alpha = 0.4  # Transparency for non-selected
+
+        # First pass: Draw non-selected trajectories (dimmed)
+        for traj in trajectories:
+            if traj.id == selected_id:
+                continue  # Skip selected, will draw later
+
+            waypoint = traj.get_first_waypoint()
+            waypoint_2d = self.project_3d_to_2d(waypoint)
+            color_bgr = (traj.color[2], traj.color[1], traj.color[0])
+
+            # Dim the color
+            dimmed_color = tuple(int(c * dim_alpha) for c in color_bgr)
+
+            # Draw dimmed circle
+            cv2.circle(annotated, waypoint_2d, self.circle_radius,
+                      dimmed_color, self.circle_thickness)
+
+            # Draw dimmed ID label
+            label_pos = (waypoint_2d[0] + self.circle_radius + 10,
+                        waypoint_2d[1] + 5)
+            cv2.putText(annotated, str(traj.id), label_pos,
+                       self.text_font, self.text_scale * 0.8, dimmed_color,
+                       self.text_thickness - 1)
+
+            # Draw dimmed arrow
+            cv2.arrowedLine(annotated, center, waypoint_2d,
+                          dimmed_color, self.arrow_thickness - 1,
+                          tipLength=0.15)
+
+        # Second pass: Draw selected trajectory (highlighted)
+        selected_traj = None
+        for traj in trajectories:
+            if traj.id == selected_id:
+                selected_traj = traj
+                break
+
+        if selected_traj is not None:
+            waypoint = selected_traj.get_first_waypoint()
+            waypoint_2d = self.project_3d_to_2d(waypoint)
+
+            # Draw pulsing effect (double circle)
+            cv2.circle(annotated, waypoint_2d, self.circle_radius + 10,
+                      highlight_color, 2)
+            cv2.circle(annotated, waypoint_2d, self.circle_radius,
+                      highlight_color, self.circle_thickness + 2)
+
+            # Draw thick arrow
+            cv2.arrowedLine(annotated, center, waypoint_2d,
+                          highlight_color, self.arrow_thickness + 2,
+                          tipLength=0.2)
+
+            # Draw ID label (larger and brighter)
+            label_pos = (waypoint_2d[0] + self.circle_radius + 15,
+                        waypoint_2d[1] + 8)
+            cv2.putText(annotated, str(selected_traj.id), label_pos,
+                       self.text_font, self.text_scale * 1.3, highlight_color,
+                       self.text_thickness + 2)
+
+            # Add "SELECTED" label at top
+            selected_label = f"SELECTED: Option #{selected_id}"
+            # Measure text size for background
+            text_size = cv2.getTextSize(selected_label, self.text_font,
+                                       1.2, 3)[0]
+
+            # Draw semi-transparent background
+            overlay = annotated.copy()
+            cv2.rectangle(overlay, (10, 10),
+                         (text_size[0] + 30, 70),
+                         (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.7, annotated, 0.3, 0, annotated)
+
+            # Draw text
+            cv2.putText(annotated, selected_label, (20, 50),
+                       self.text_font, 1.2, highlight_color, 3)
+
+        # Draw center reference point
+        cv2.circle(annotated, center, 5, (128, 128, 128), -1)
 
         return annotated

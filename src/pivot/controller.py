@@ -19,7 +19,6 @@ from .candidate_generator import CandidateGenerator
 from .visual_overlay import VisualOverlay
 from .trajectory import Trajectory
 from .executor import TrajectoryExecutor
-from .safety import SafetyChecker
 from .vlm_client import VLMClient
 from .visualization import PivotVisualizer
 
@@ -58,9 +57,7 @@ class PivotController:
             num_candidates=config.get('num_candidates', 8),
             depth_range=tuple(config.get('depth_range', [0.5, 2.0])),
             lateral_range=tuple(config.get('lateral_range', [-1.5, 1.5])),
-            vertical_range=tuple(config.get('vertical_range', [-0.8, 0.8])),
-            vlm_client=vlm_client,
-            visual_overlay=None  # Will set after overlay created
+            vertical_range=tuple(config.get('vertical_range', [-0.8, 0.8]))
         )
 
         self.overlay = VisualOverlay(
@@ -70,31 +67,19 @@ class PivotController:
             fov_vertical=config.get('fov_vertical', 90.0)
         )
 
-        # Link overlay to candidate generator for inverse projection
-        self.candidate_gen.overlay = self.overlay
+        # In parallel runs we often want "selection only" (no per-instance execution).
+        self.execute_selected_trajectory = config.get('execute_selected_trajectory', True)
+        self.executor = TrajectoryExecutor(airsim_client, config) if self.execute_selected_trajectory else None
 
-        self.executor = TrajectoryExecutor(airsim_client, config)
-
-        # Initialize safety checker
-        self.enable_safety = config.get('enable_safety_checks', True)
-        if self.enable_safety:
-            self.safety_checker = SafetyChecker(config)
-        else:
-            self.safety_checker = None
-
-        # Algorithm parameters
+        # Algorithm parameters (paper-style: run for N iterations)
         self.max_iterations = config.get('max_iterations', 3)
         self.refinement_factor = config.get('refinement_factor', 0.5)
-        self.convergence_threshold = config.get('convergence_threshold', 0.9)
-
-        # Frame re-capture settings
-        self.enable_closed_loop = config.get('enable_closed_loop', True)
-        self.frame_recapture_interval = config.get('frame_recapture_interval', 1)
-        self.enable_depth_gating = config.get('enable_depth_gating', False)
+        self.vlm_select_k = int(config.get('vlm_select_k', 3))
 
         # Visualization settings
         self.save_iterations = config.get('save_iterations', True)
         self.output_dir = config.get('output_dir', 'pivot_visualizations')
+        self.collect_iteration_artifacts = config.get('collect_iteration_artifacts', False)
 
         # Create root output directory with timestamp; per-navigation runs go inside this folder
         self.timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -112,8 +97,6 @@ class PivotController:
 
         print(f"[PivotController] Initialized with {config.get('num_candidates', 8)} candidates")
         print(f"[PivotController] Max iterations: {self.max_iterations}")
-        print(f"[PivotController] Safety checks: {self.enable_safety}")
-        print(f"[PivotController] Closed-loop: {self.enable_closed_loop}")
         print(f"[PivotController] Output directory: {self.session_dir}")
 
     def navigate_with_pivot(self,
@@ -151,31 +134,16 @@ class PivotController:
         print(f"{'='*60}")
         print(f"[Output] Artifacts for this run: {run_dir}")
 
-        # Phase 1: Generate initial candidates
+        # Phase 1: Generate initial candidates (paper: random proposals from action space)
         print("\n[Phase 1] Generating initial candidates...")
-        use_vlm = self.config.get('use_vlm_based_candidates', False)
-        candidates = self.candidate_gen.generate_initial_candidates(
-            instruction,
-            image=current_frame,
-            use_vlm=use_vlm
-        )
-        print(f"Generated {len(candidates)} initial candidates (VLM-based: {use_vlm})")
-
-        # Apply safety filtering
-        if self.enable_safety:
-            print("\n[Safety] Filtering unsafe candidates...")
-            depth_map = self._capture_depth_map() if self.enable_depth_gating else None
-            candidates = self.safety_checker.filter_unsafe_candidates(
-                candidates,
-                depth_map=depth_map,
-                overlay=self.overlay
-            )
-            print(f"[Safety] {len(candidates)} safe candidates remaining")
+        candidates = self.candidate_gen.generate_initial_candidates()
+        print(f"Generated {len(candidates)} initial candidates")
 
         best_trajectory = None
         search_radius = 1.0  # Initial search radius
         iteration_history = []
         execution_results = []  # Track all executions
+        iteration_artifacts = []  # Optional in-memory images for parallel runs
 
         # Phase 2: Iterative refinement BEFORE execution (paper-aligned)
         for iteration in range(self.max_iterations):
@@ -183,38 +151,14 @@ class PivotController:
             print(f"PIVOT Iteration {iteration + 1}/{self.max_iterations}")
             print(f"{'='*60}")
 
-            # Optional recapture before each iteration to reflect scene changes
-            if self.enable_closed_loop and (iteration == 0 or (iteration % max(self.frame_recapture_interval, 1) == 0)):
-                fresh_frame = self._capture_fresh_frame()
-                if fresh_frame is not None:
-                    current_frame = fresh_frame
-                    print(f"[Closed-Loop] Frame refreshed for iteration {iteration + 1}")
-                else:
-                    print(f"[Closed-Loop] WARNING: Frame capture failed; using previous frame")
-
-            # Optional depth map capture for obstacle gating
-            depth_map = None
-            if self.enable_depth_gating:
-                depth_map = self._capture_depth_map()
-                if depth_map is None:
-                    print("[Depth] WARNING: Depth capture failed; skipping depth gating this iteration")
-
             # Overlay candidates on current frame
             annotated_image = self.overlay.overlay_candidates(current_frame, candidates)
-
-            # Store iteration image for composite visualization
-            if self.enable_advanced_viz:
-                self.iteration_images.append(annotated_image.copy())
 
             # Store initial frame for before/after comparison
             if iteration == 0 and self.initial_frame is None:
                 self.initial_frame = current_frame.copy()
 
-            # Save visualization (per-iteration)
-            if self.save_iterations:
-                self._save_iteration_viz(annotated_image, iteration, candidates, run_dir)
-
-            # Query VLM for selection
+            # Query VLM for selection (paper-style top-K points)
             print(f"[Iteration {iteration + 1}] Querying VLM with {len(candidates)} candidates...")
             selection_result = self._query_vlm_for_selection(
                 annotated_image,
@@ -224,50 +168,65 @@ class PivotController:
             )
 
             best_trajectory = selection_result['selected_trajectory']
-            confidence = selection_result['confidence']
+            selected_trajectories = selection_result['selected_trajectories']
             reasoning = selection_result['reasoning']
+            selected_ids = selection_result['selected_ids']
+
+            # Create selection-highlight image (used for saving and optional composites).
+            highlighted_image = self.overlay.overlay_candidates_with_selection(
+                current_frame,
+                candidates,
+                best_trajectory.id
+            )
+
+            # Store iteration image for composite visualization (paper-style panels)
+            if self.enable_advanced_viz:
+                self.iteration_images.append(highlighted_image.copy())
+
+            if self.save_iterations:
+                # Save both: candidates overlay and selected highlight (matches "후보 -> 선정" flow).
+                self._save_iteration_viz(annotated_image, iteration, run_dir, tag="candidates")
+                self._save_iteration_viz(highlighted_image, iteration, run_dir, tag="selected")
+
+            if self.collect_iteration_artifacts:
+                # Keep compressed images in memory (for parallel: save only chosen instance later).
+                ok1, buf1 = cv2.imencode(".jpg", annotated_image)
+                ok2, buf2 = cv2.imencode(".jpg", highlighted_image)
+                if ok1 and ok2:
+                    iteration_artifacts.append({
+                        "iteration": iteration + 1,
+                        "selected_id": best_trajectory.id,
+                        "selected_ids": selected_ids,
+                        "candidates_jpg": buf1.tobytes(),
+                        "selected_jpg": buf2.tobytes(),
+                    })
 
             # Store iteration result
             iteration_history.append({
                 'iteration': iteration + 1,
                 'selected_id': best_trajectory.id,
-                'confidence': confidence,
+                'selected_ids': selected_ids,
                 'reasoning': reasoning,
                 'search_radius': search_radius,
                 'num_candidates': len(candidates)
             })
 
             print(f"[Iteration {iteration + 1}] Selected: Option {best_trajectory.id}")
-            print(f"[Iteration {iteration + 1}] Confidence: {confidence:.3f}")
             print(f"[Iteration {iteration + 1}] Reasoning: {reasoning}")
-
-            # Check convergence BEFORE execution (paper loop)
-            if confidence >= self.convergence_threshold:
-                print(f"\n✓ Converged at iteration {iteration + 1} (confidence: {confidence:.3f} >= {self.convergence_threshold})")
-                break
 
             if iteration == self.max_iterations - 1:
                 print(f"\n→ Maximum iterations reached ({self.max_iterations})")
                 break
 
-            # Refine candidates around new position
+            # Refine candidates by fitting an action distribution to the top-K selected actions (paper-aligned)
             search_radius *= self.refinement_factor
-            print(f"\n[Refinement] Reducing search radius to {search_radius:.3f}")
+            print(f"\n[Refinement] Updating proposal distribution (scale factor: {search_radius:.3f})")
             candidates = self.candidate_gen.refine_candidates(
-                best_trajectory,
-                iteration + 1,
-                search_radius
+                selected_trajectories=selected_trajectories,
+                iteration=iteration + 1,
+                scale=search_radius
             )
             print(f"[Refinement] Generated {len(candidates)} refined candidates")
-
-            # Apply safety filtering to refined candidates
-            if self.enable_safety:
-                candidates = self.safety_checker.filter_unsafe_candidates(
-                    candidates,
-                    depth_map=depth_map,
-                    overlay=self.overlay
-                )
-                print(f"[Safety] {len(candidates)} safe refined candidates")
 
             # Save progressive refinement snapshot per iteration (pre-execution)
             if self.save_iterations and self.enable_advanced_viz and visualizer:
@@ -284,18 +243,29 @@ class PivotController:
             else:
                 print("[Viz] Skipping progressive refinement snapshot (advanced viz disabled or unavailable)")
 
-        # Aggregate execution results
-        # Execute the selected trajectory once after refinement
-        print(f"\n[Execute] Running selected trajectory {best_trajectory.id} after refinement loop")
-        execution_result_single = self.executor.execute_trajectory(best_trajectory)
-        execution_results.append(execution_result_single)
-
+        # Execute the selected trajectory once after refinement (optional; disabled in parallel instances)
         execution_result = {
-            'all_executions': execution_results,
-            'total_executions': len(execution_results),
+            'all_executions': [],
+            'total_executions': 0,
             'final_trajectory_id': best_trajectory.id if best_trajectory else None,
-            'success': execution_result_single.get('success', True)
+            'success': True,
+            'skipped': not self.execute_selected_trajectory
         }
+
+        if self.execute_selected_trajectory:
+            print(f"\n[Execute] Running selected trajectory {best_trajectory.id} after refinement loop")
+            if self.executor is None:
+                self.executor = TrajectoryExecutor(self.client, self.config)
+            execution_result_single = self.executor.execute_trajectory(best_trajectory)
+            execution_results.append(execution_result_single)
+            execution_result.update({
+                'all_executions': execution_results,
+                'total_executions': len(execution_results),
+                'success': execution_result_single.get('success', True),
+                'skipped': False
+            })
+        else:
+            print("\n[Execute] Skipped (execute_selected_trajectory=false)")
 
         # Save final result
         if self.save_iterations:
@@ -314,7 +284,8 @@ class PivotController:
             'iterations': len(iteration_history),
             'execution': execution_result,
             'iteration_history': iteration_history,
-            'instruction': instruction
+            'instruction': instruction,
+            'iteration_artifacts': iteration_artifacts
         }
 
     def _query_vlm_for_selection(self,
@@ -335,35 +306,26 @@ class PivotController:
             Dictionary with selected_trajectory, confidence, reasoning
         """
         candidate_ids = [t.id for t in candidates]
+        k = max(1, min(self.vlm_select_k, len(candidate_ids)))
 
-        prompt = f"""You are a drone navigation expert. The image shows a drone camera view with {len(candidates)} numbered trajectory options overlaid as colored circles with arrows.
+        # Paper-style navigation prompt adapted for a drone:
+        # - numbered circles are candidate waypoint destinations
+        # - arrows indicate direction from the drone (image center) to the waypoint
+        # - choose top-K numbers; skip analysis; return JSON {"points": []}
+        prompt = f"""You are a drone that cannot fly through obstacles. This is the image you are seeing right now.
+I have annotated it with numbered circles and arrows. Each number represents a candidate waypoint destination you can fly toward.
+The arrow shows the direction from the drone (image center) to that waypoint.
 
-TASK: {instruction}
+Your task is to choose which circles you should pick for the task of: {instruction}
 
-ITERATION: {iteration + 1}
-
-The colored circles show possible waypoint destinations for the drone. Each option is numbered (IDs: {candidate_ids}).
-
-Analyze each option considering:
-1. Alignment with the task "{instruction}"
-2. Safety (avoiding obstacles)
-3. Efficiency (direct path)
-4. Feasibility (reasonable position)
-
-Select the BEST option and provide your reasoning.
-
-Return JSON in this EXACT format:
-{{
-    "selected_option": <option_number>,
-    "confidence": <0.0-1.0>,
-    "reasoning": "Brief explanation of why this option is best",
-    "risk_assessment": "Any potential risks or concerns"
-}}
+Choose the {k} best candidate numbers.
+Do NOT choose routes that would go through obstacles or unsafe gaps.
+Skip analysis and provide your answer at the end in a json file of this form:
+{{"points": []}}
 
 IMPORTANT:
-- selected_option must be one of: {candidate_ids}
-- confidence should reflect how certain you are (1.0 = very certain, 0.0 = uncertain)
-- Be concise but specific in reasoning
+- "points" must contain ONLY numbers from: {candidate_ids}
+- Return "points" ordered from BEST to WORST
 """
 
         try:
@@ -373,33 +335,48 @@ IMPORTANT:
 
             # Parse JSON response
             response_json = json.loads(response_text)
+            points = response_json.get('points', [])
+            if not isinstance(points, list):
+                raise ValueError("VLM response 'points' must be a list")
 
-            selected_id = int(response_json['selected_option'])
-            confidence = float(response_json.get('confidence', 0.5))
-            reasoning = response_json.get('reasoning', 'No reasoning provided')
-            risk = response_json.get('risk_assessment', 'No assessment provided')
-
-            # Find selected trajectory
-            selected_traj = None
-            for t in candidates:
-                if t.id == selected_id:
-                    selected_traj = t
+            selected_ids: List[int] = []
+            for raw in points:
+                try:
+                    val = int(raw)
+                except (TypeError, ValueError):
+                    continue
+                if val in candidate_ids and val not in selected_ids:
+                    selected_ids.append(val)
+                if len(selected_ids) >= k:
                     break
 
-            if selected_traj is None:
-                print(f"Warning: VLM selected invalid ID {selected_id}, defaulting to first candidate")
-                selected_traj = candidates[0]
-                confidence = 0.3
+            if not selected_ids:
+                print("Warning: VLM returned no valid points; defaulting to middle candidate")
+                selected_ids = [candidate_ids[len(candidate_ids) // 2]]
 
-            # Update trajectory with VLM feedback
-            selected_traj.score = confidence
-            selected_traj.reasoning = reasoning
+            selected_trajectories = [t for t in candidates if t.id in selected_ids]
+            if not selected_trajectories:
+                selected_trajectories = [candidates[0]]
+                selected_ids = [selected_trajectories[0].id]
+
+            # Best trajectory is the first returned (prompt asks BEST->WORST)
+            best = selected_trajectories[0]
+
+            # Provide a compatibility confidence: higher when fewer options are picked.
+            confidence = float(response_json.get('confidence', max(0.2, 1.0 / len(selected_trajectories))))
+            reasoning = response_json.get('reasoning', '')
+            risk = response_json.get('risk_assessment', '')
+
+            best.score = confidence
+            best.reasoning = reasoning
 
             return {
-                'selected_trajectory': selected_traj,
+                'selected_trajectory': best,
+                'selected_trajectories': selected_trajectories,
+                'selected_ids': selected_ids,
                 'confidence': confidence,
-                'reasoning': reasoning,
-                'risk_assessment': risk
+                'reasoning': reasoning or "Selected top-K candidates",
+                'risk_assessment': risk or "Not provided"
             }
 
         except (json.JSONDecodeError, KeyError, ValueError) as e:
@@ -411,6 +388,8 @@ IMPORTANT:
             fallback_traj.score = 0.3
             return {
                 'selected_trajectory': fallback_traj,
+                'selected_trajectories': [fallback_traj],
+                'selected_ids': [fallback_traj.id],
                 'confidence': 0.3,
                 'reasoning': 'Fallback due to parse error',
                 'risk_assessment': 'Unknown'
@@ -419,39 +398,14 @@ IMPORTANT:
     def _save_iteration_viz(self,
                            annotated_image: np.ndarray,
                            iteration: int,
-                           candidates: List[Trajectory],
-                           run_dir: str):
-        """Save visualization for this iteration"""
+                           run_dir: str,
+                           tag: str):
+        """Save a visualization image for this iteration."""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        img_filename = f"iteration_{iteration + 1}_{timestamp}.jpg"
+        img_filename = f"iteration_{iteration + 1}_{tag}_{timestamp}.jpg"
         img_path = os.path.join(run_dir, img_filename)
 
         cv2.imwrite(img_path, annotated_image)
-
-        # Save candidate metadata
-        json_filename = f"iteration_{iteration + 1}_{timestamp}.json"
-        json_path = os.path.join(run_dir, json_filename)
-
-        metadata = {
-            'iteration': iteration + 1,
-            'timestamp': timestamp,
-            'num_candidates': len(candidates),
-            'candidates': [
-                {
-                    'id': t.id,
-                    'waypoint': {
-                        'x': t.get_first_waypoint().x,
-                        'y': t.get_first_waypoint().y,
-                        'z': t.get_first_waypoint().z
-                    },
-                    'color': t.color
-                }
-                for t in candidates
-            ]
-        }
-
-        with open(json_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
 
     def _save_final_result(self,
                           trajectory: Trajectory,
@@ -502,77 +456,3 @@ IMPORTANT:
                 iteration_history,
                 plot_path
             )
-
-    def _capture_fresh_frame(self) -> np.ndarray:
-        """
-        Re-capture frame from AirSim for closed-loop iteration
-
-        Returns:
-            Fresh camera frame as numpy array (BGR format), or None on failure
-        """
-        import airsim
-
-        try:
-            # Use camera_name from config instead of hardcoded "0"
-            camera_name = self.config.get('camera_name', '0')
-
-            # Capture image from AirSim
-            responses = self.client.simGetImages([
-                airsim.ImageRequest(camera_name, airsim.ImageType.Scene, False, False)
-            ])
-
-            if responses and len(responses) > 0:
-                # Convert to numpy array
-                img_response = responses[0]
-
-                # Check that image data exists before processing
-                if img_response.image_data_uint8:
-                    img1d = np.frombuffer(img_response.image_data_uint8, dtype=np.uint8)
-                    img_rgb = img1d.reshape(img_response.height, img_response.width, 3)
-
-                    # Convert RGB to BGR for OpenCV
-                    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-                    return img_bgr
-                else:
-                    print("[Controller] Warning: Empty image data")
-                    return None
-            else:
-                print("[Controller] Warning: No image response")
-                return None
-
-        except Exception as e:
-            print(f"[Controller] Error capturing frame: {e}")
-            return None
-
-    def _capture_depth_map(self) -> Optional[np.ndarray]:
-        """
-        Capture a depth map from AirSim for depth-based gating.
-
-        Returns:
-            Depth map as numpy array (H, W) in meters, or None on failure
-        """
-        import airsim
-
-        try:
-            camera_name = self.config.get('camera_name', '0')
-            # DepthPlanar is the current AirSim depth type; DepthPlanner is legacy.
-            responses = self.client.simGetImages([
-                airsim.ImageRequest(camera_name, airsim.ImageType.DepthPlanar, True, False)
-            ])
-
-            if not responses:
-                print("[Depth] Warning: No depth response")
-                return None
-
-            response = responses[0]
-            if not response.image_data_float:
-                print("[Depth] Warning: Empty depth data")
-                return None
-
-            depth_array = np.array(response.image_data_float, dtype=np.float32)
-            depth_image = depth_array.reshape(response.height, response.width)
-            return depth_image
-
-        except Exception as e:
-            print(f"[Depth] Error capturing depth map: {e}")
-            return None

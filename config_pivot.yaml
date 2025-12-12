@@ -1,6 +1,5 @@
-# PIVOT Enhanced Configuration
+# PIVOT Configuration
 # Prompting with Iterative Visual Optimization for Drone Navigation
-# Includes improvements for yaw handling, safety checks, and frame re-capture
 
 # ============================================================================
 # API Provider Configuration
@@ -11,99 +10,26 @@ api_provider: "gemini"
 # Specify the exact model name to use
 # Leave empty to use provider defaults
 # Examples: "gemini-2.5-flash", "gemini-2.5-pro", "openai/gpt-4.1"
-model_name: "gemini-2.5-flash"
+model_name: "gemini-2.5-pro"
 
 # ============================================================================
 # PIVOT Algorithm Parameters
 # ============================================================================
 # Number of trajectory options to present per iteration
-num_candidates: 8
+num_candidates: 10
 
 # Maximum number of refinement iterations
 # Recommended: 3-4 for balance of accuracy and VLM cost
-max_iterations: 3
+max_iterations: 2
 
 # Search radius reduction factor per iteration
 # Each iteration reduces search space by this factor
 # 0.5 = 50% reduction (recommended)
 refinement_factor: 0.5
 
-# Confidence threshold for early convergence
-# If VLM confidence >= this value, stop iterating
-# Range: 0.0 to 1.0 (0.9 recommended)
-convergence_threshold: 0.9
-
-# ============================================================================
-# NEW: Enhanced Candidate Generation
-# ============================================================================
-# Include yaw angles in trajectory candidates
-include_yaw_in_candidates: true
-
-# Use VLM-based candidate generation
-# When true: VLM identifies relevant regions in image, candidates sampled around those regions
-# When false: Fixed radial sampling pattern (faster, deterministic)
-# Recommended: true for full paper fidelity and instruction-conditioned generation
-# Note: VLM-based generation adds 1 extra VLM API call per PIVOT iteration
-use_vlm_based_candidates: true
-
-# Multi-step trajectories (future feature - complex to visualize)
-multi_step_trajectories: false
-
-# ============================================================================
-# NEW: Closed-Loop Frame Re-capture
-# ============================================================================
-# Re-capture frames during iterative refinement
-# Critical for closed-loop validation
-# NOTE: Currently, iterations run before execution, not during.
-# Frame recapture happens between navigation cycles, not mid-refinement.
-# For true per-iteration closed-loop, set execute_per_iteration=true
-enable_closed_loop: true
-
-# Recapture frame every N iterations (1 = every iteration)
-frame_recapture_interval: 1
-
-# Execute trajectory after each iteration (true closed-loop)
-# false (default) = all iterations before execution
-# true = execute after each iteration, recapture, refine
-execute_per_iteration: false
-
-# Check if goal is reached during iterations
-enable_goal_checking: false  # Future feature
-
-# ============================================================================
-# NEW: Safety and Feasibility Checks
-# ============================================================================
-# Enable safety filtering of unsafe candidates
-enable_safety_checks: true
-
-# Optional: depth-based obstacle gating (requires AirSim depth)
-enable_depth_gating: true
-
-# Workspace bounds (camera-relative coordinates in meters)
-workspace_bounds:
-  x_min: -5.0   # Left limit
-  x_max: 5.0    # Right limit
-  y_min: 0.5    # Forward minimum (don't fly backwards too far)
-  y_max: 10.0   # Forward maximum
-  z_min: 0.5    # Minimum altitude
-  z_max: 5.0    # Maximum altitude
-
-# Velocity and altitude constraints
-max_velocity: 3.0      # Maximum velocity in m/s
-min_altitude: 0.5      # Minimum altitude in meters
-max_altitude: 10.0     # Maximum altitude in meters
-safety_margin: 0.2     # Safety margin from bounds in meters
-# Margin for depth obstacle gating (meters)
-depth_gate_margin: 0.3
-
-# ============================================================================
-# NEW: Yaw Control Parameters
-# ============================================================================
-# Yaw threshold - rotate only if delta exceeds this (degrees)
-yaw_threshold: 5.0
-
-# Position verification after movement
-verify_position: true
+# Paper-style PIVOT selection: choose top-K candidates each iteration
+# Used in the adapted navigation prompt JSON: {"points":[...]}
+vlm_select_k: 1
 
 # ============================================================================
 # Candidate Generation Bounds
@@ -117,6 +43,16 @@ verify_position: true
 depth_range: [0.5, 3.0]         # Forward distance range (extended)
 lateral_range: [-2.0, 2.0]      # Left/right range (extended)
 vertical_range: [-1.0, 1.0]     # Up/down range (extended)
+
+# ============================================================================
+# Execution (Paper-style depth-limited step)
+# ============================================================================
+# Use AirSim depth image to limit how far the drone moves along the selected direction.
+enable_depth_step_limit: true
+# Maximum step distance in meters (paper mobile manipulator uses max 1.0m).
+max_step_distance_m: 1.0
+# Optional safety margin: subtract from depth before limiting.
+depth_step_margin_m: 0.0
 
 # ============================================================================
 # Image and Camera Configuration
@@ -182,24 +118,21 @@ default_instruction: "fly to the red car"
 # Run E parallel PIVOT instances for robustness
 # 1 = single instance (no parallelism)
 # 3-5 = recommended for robust ensemble execution
-num_parallel_instances: 1
+num_parallel_instances: 3
 
 # Result aggregation method
 # "voting" = majority vote on similar trajectories (recommended)
 # "confidence" = weight by VLM confidence scores
 # "average" = average waypoint positions
-aggregation_method: "voting"
+aggregation_method: "vlm"
+# "vlm" = query VLM again to pick best among E final actions (paper Section 3.3 option 2)
 
 # Enable parallel execution
 # false (default) = single PIVOT instance
 # true = run num_parallel_instances in parallel
-enable_parallel_execution: false
+enable_parallel_execution: true
 
 # ============================================================================
 # Advanced Options
 # ============================================================================
-# Wind simulation (if needed, matches see-point-fly format)
-# NED frame: North, East, Down in m/s
-wind_x: 0.0
-wind_y: 0.0
-wind_z: 0.0
+ 

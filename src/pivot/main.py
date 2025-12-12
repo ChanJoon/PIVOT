@@ -19,19 +19,23 @@ from .controller import PivotController
 from .vlm_client import VLMClient
 
 
-def get_rgb_from_response(img_response):
+def get_bgr_from_response(img_response):
     """
-    Convert AirSim image response to RGB numpy array
+    Convert AirSim image response to BGR numpy array (OpenCV-friendly)
+
+    Matches the see-point-fly handling: reshape the uint8 buffer directly
+    without a color channel swap so downstream uses stay consistent with
+    OpenCV/BGR expectations.
 
     Args:
         img_response: AirSim ImageResponse object
 
     Returns:
-        RGB image as numpy array
+        BGR image as numpy array
     """
     img1d = np.frombuffer(img_response.image_data_uint8, dtype=np.uint8)
-    img_rgb = img1d.reshape(img_response.height, img_response.width, 3)
-    return img_rgb
+    img_bgr = img1d.reshape(img_response.height, img_response.width, 3)
+    return img_bgr
 
 
 def capture_airsim_image(client, camera_name: str = "0"):
@@ -51,10 +55,7 @@ def capture_airsim_image(client, camera_name: str = "0"):
     ])
 
     if responses:
-        img_rgb = get_rgb_from_response(responses[0])
-        # Convert RGB to BGR for OpenCV
-        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-        return img_bgr
+        return get_bgr_from_response(responses[0])
     else:
         print("Warning: No image response from AirSim")
         return None
